@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Knot — your context, connected</title>
+<style>
+  :root { --bg:#0f1220; --panel:#181c2e; --ink:#e8eaf6; --mut:#9aa0c3;
+          --acc:#7c9cff; --line:#2a2f4a; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+         background:var(--bg); color:var(--ink); }
+  header { padding:18px 24px 0; }
+  header h1 { margin:0; font-size:22px; }
+  header h1 span { color:var(--acc); }
+  header p { margin:4px 0 0; color:var(--mut); font-size:14px; }
+  main { display:grid; grid-template-columns: 340px 1fr; gap:16px; padding:16px 24px 24px; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  .card h2 { margin:0 0 10px; font-size:15px; }
+  input, select, textarea { width:100%; padding:9px 10px; margin:4px 0 8px;
+    background:#0f1220; color:var(--ink); border:1px solid var(--line);
+    border-radius:8px; font:inherit; font-size:14px; }
+  button { padding:9px 14px; background:var(--acc); color:#0f1220; border:0;
+    border-radius:8px; font-weight:600; cursor:pointer; font-size:14px; }
+  button.ghost { background:transparent; color:var(--acc); border:1px solid var(--acc); }
+  #answer { white-space:pre-wrap; font-size:14px; line-height:1.5; }
+  #answer .cypher { color:var(--mut); font-family:ui-monospace,monospace;
+    font-size:12px; display:block; margin-top:8px; }
+  #answer .path { color:var(--acc); }
+  #stats { color:var(--mut); font-size:13px; margin-top:10px; }
+  #graph { width:100%; height:520px; display:block; background:#0b0e1a;
+    border-radius:8px; }
+  .hint { color:var(--mut); font-size:12px; margin-top:8px; line-height:1.5; }
+  .legend { font-size:12px; color:var(--mut); margin-top:8px; }
+  .legend b { display:inline-block; width:10px; height:10px; border-radius:50%; margin:0 4px 0 10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Knot <span>— your context, connected</span></h1>
+  <p>A personal context agent whose memory is a <b>Relate</b> graph (embedded, Cypher 25).
+     Ask a question — the answer shows the exact graph paths it came from.</p>
+</header>
+<main>
+  <section>
+    <div class="card">
+      <h2>Ask the graph</h2>
+      <input id="q" placeholder='e.g. who works on Knot? / what is blocked by Record Knot demo video? / what did we decide about bounty hunting?' value="who works on Knot?">
+      <button id="askBtn">Ask</button>
+      <div id="answer" style="margin-top:12px">Ask something to see the answer and its evidence paths.</div>
+      <div id="stats"></div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h2>Remember something</h2>
+      <select id="kind">
+        <option value="person">Person</option>
+        <option value="project">Project</option>
+        <option value="decision">Decision</option>
+        <option value="task">Task</option>
+        <option value="topic">Topic</option>
+        <option value="note">Note</option>
+      </select>
+      <input id="f1" placeholder="name">
+      <input id="f2" placeholder="role / status / text (optional)">
+      <button id="saveBtn">Remember</button>
+      <div class="hint">Person: name + role. Project: name + status. Decision/Note: text.
+        Task: title + status. Topic: name. The graph redraws after every save.</div>
+    </div>
+  </section>
+  <section class="card">
+    <h2>The graph — live from Relate</h2>
+    <svg id="graph"></svg>
+    <div class="legend" id="legend"></div>
+    <div class="hint">Drag nodes to rearrange. Every node and edge here is a real row
+      in the embedded <code>knot.rl</code> store, queried with Cypher.</div>
+  </section>
+</main>
+<script>
+const COLORS = { Person:"#7c9cff", Project:"#5fd08a", Decision:"#f2b04e",
+                 Task:"#e06c9f", Topic:"#9aa0c3", Note:"#c9a7eb" };
+const svg = document.getElementById("graph");
+let nodes = [], edges = [];
+let W = 0, H = 0;
+
+function resize() {
+  W = svg.clientWidth; H = svg.clientHeight;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+}
+window.addEventListener("resize", resize);
+
+async function loadGraph() {
+  const res = await fetch("/api/graph");
+  const g = await res.json();
+  nodes = g.nodes.map(n => ({...n, x: Math.random()*600+40, y: Math.random()*400+40, vx:0, vy:0}));
+  edges = g.edges;
+  resize();
+  const legend = document.getElementById("legend");
+  legend.innerHTML = Object.entries(COLORS).map(([k,c]) =>
+    `<b style="background:${c}"></b>${k}`).join("");
+  draw();
+  const s = await (await fetch("/api/stats")).json();
+  document.getElementById("stats").textContent =
+    `${s.nodes} nodes · ${s.relationships} relationships · ` +
+    Object.entries(s.by_label).map(([k,v]) => `${k} ${v}`).join(" · ");
+}
+
+function draw() {
+  // tiny force layout: repulsion + spring, 60 ticks per redraw
+  for (let t = 0; t < 60; t++) {
+    for (const n of nodes) { n.vx *= 0.85; n.vy *= 0.85; }
+    for (let i = 0; i < nodes.length; i++)
+      for (let j = i+1; j < nodes.length; j++) {
+        const a = nodes[i], b = nodes[j];
+        let dx = a.x-b.x, dy = a.y-b.y, d2 = dx*dx+dy*dy || 1;
+        const f = 2600/d2, d = Math.sqrt(d2);
+        a.vx += dx/d*f; a.vy += dy/d*f; b.vx -= dx/d*f; b.vy -= dy/d*f;
+      }
+    for (const e of edges) {
+      const a = nodes[e.source], b = nodes[e.target];
+      let dx = b.x-a.x, dy = b.y-a.y, d = Math.hypot(dx,dy) || 1;
+      const f = (d-110)*0.02;
+      a.vx += dx/d*f; a.vy += dy/d*f; b.vx -= dx/d*f; b.vy -= dy/d*f;
+    }
+    for (const n of nodes) {
+      n.x = Math.min(W-30, Math.max(30, n.x + n.vx));
+      n.y = Math.min(H-30, Math.max(30, n.y + n.vy));
+    }
+  }
+  const NS = "http://www.w3.org/2000/svg";
+  svg.innerHTML = "";
+  for (const e of edges) {
+    const a = nodes[e.source], b = nodes[e.target];
+    const line = document.createElementNS(NS, "line");
+    line.setAttribute("x1", a.x); line.setAttribute("y1", a.y);
+    line.setAttribute("x2", b.x); line.setAttribute("y2", b.y);
+    line.setAttribute("stroke", "#2a2f4a"); line.setAttribute("stroke-width", "1.5");
+    svg.appendChild(line);
+    const mid = document.createElementNS(NS, "text");
+    mid.setAttribute("x", (a.x+b.x)/2); mid.setAttribute("y", (a.y+b.y)/2 - 4);
+    mid.setAttribute("fill", "#9aa0c3"); mid.setAttribute("font-size", "9");
+    mid.setAttribute("text-anchor", "middle");
+    mid.textContent = e.rel;
+    svg.appendChild(mid);
+  }
+  for (const n of nodes) {
+    const g = document.createElementNS(NS, "g");
+    const c = document.createElementNS(NS, "circle");
+    c.setAttribute("cx", n.x); c.setAttribute("cy", n.y); c.setAttribute("r", 14);
+    c.setAttribute("fill", COLORS[n.label] || "#888");
+    c.setAttribute("stroke", "#0f1220"); c.setAttribute("stroke-width", "2");
+    const t = document.createElementNS(NS, "text");
+    t.setAttribute("x", n.x); t.setAttribute("y", n.y + 28);
+    t.setAttribute("fill", "#e8eaf6"); t.setAttribute("font-size", "11");
+    t.setAttribute("text-anchor", "middle");
+    t.textContent = n.key.length > 26 ? n.key.slice(0, 25) + "…" : n.key;
+    g.appendChild(c); g.appendChild(t);
+    g.style.cursor = "grab";
+    g.addEventListener("mousedown", ev => {
+      const move = e2 => {
+        const pt = svg.createSVGPoint();
+        pt.x = e2.clientX; pt.y = e2.clientY;
+        const p = pt.matrixTransform(svg.getScreenCTM().inverse());
+        n.x = p.x; n.y = p.y; draw();
+      };
+      const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
+      window.addEventListener("mousemove", move);
+      window.addEventListener("mouseup", up);
+    });
+    svg.appendChild(g);
+  }
+}
+
+async function ask() {
+  const q = document.getElementById("q").value;
+  const res = await fetch("/api/ask?q=" + encodeURIComponent(q));
+  const r = await res.json();
+  let html = `<div>${r.answer}</div>`;
+  if (r.paths && r.paths.length)
+    html += r.paths.map(p =>
+      `<div class="path">${p.from.key} —[${p.rel}]→ ${p.to.key}</div>`).join("");
+  if (r.cypher) html += `<span class="cypher">${r.cypher}</span>`;
+  document.getElementById("answer").innerHTML = html;
+}
+
+document.getElementById("askBtn").addEventListener("click", ask);
+document.getElementById("q").addEventListener("keydown", e => { if (e.key === "Enter") ask(); });
+
+document.getElementById("saveBtn").addEventListener("click", async () => {
+  const kind = document.getElementById("kind").value;
+  const f1 = document.getElementById("f1").value.trim();
+  const f2 = document.getElementById("f2").value.trim();
+  if (!f1) { alert("Fill in the first field."); return; }
+  const props = {};
+  if (kind === "person") { props.name = f1; if (f2) props.role = f2; }
+  else if (kind === "project") { props.name = f1; if (f2) props.status = f2; }
+  else if (kind === "decision" || kind === "note") { props.text = f1; if (f2) props.date = f2; }
+  else if (kind === "task") { props.title = f1; if (f2) props.status = f2; }
+  else if (kind === "topic") { props.name = f1; }
+  const res = await fetch("/api/remember", { method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({kind, props}) });
+  const r = await res.json();
+  if (!r.ok) { alert("Could not save: " + r.error); return; }
+  document.getElementById("f1").value = "";
+  document.getElementById("f2").value = "";
+  await loadGraph();
+});
+
+loadGraph();
+</script>
+</body>
+</html>
